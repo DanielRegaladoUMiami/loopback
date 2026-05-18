@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import tarfile
+import time
 from pathlib import Path
 
 import polars as pl
@@ -11,6 +12,7 @@ import requests
 from tqdm import tqdm
 
 DATA_URL = "http://mtg.upf.edu/static/datasets/last.fm/lastfm-dataset-1K.tar.gz"
+MAX_RETRIES = 20
 RAW_DIR = Path("data/raw")
 PROCESSED_DIR = Path("data/processed")
 TSV_NAME = "userid-timestamp-artid-artname-traid-traname.tsv"
@@ -25,20 +27,52 @@ TSV_SCHEMA = {
 }
 
 
+def _expected_size(url: str) -> int:
+    r = requests.head(url, timeout=30, allow_redirects=True)
+    r.raise_for_status()
+    return int(r.headers.get("content-length", 0))
+
+
 def download(url: str = DATA_URL, dest_dir: Path = RAW_DIR) -> Path:
+    """Resumable download with exponential backoff. The mtg.upf.edu server is flaky."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     archive = dest_dir / "lastfm-dataset-1K.tar.gz"
-    if archive.exists():
-        print(f"[skip] {archive} already exists")
-        return archive
 
-    with requests.get(url, stream=True, timeout=60) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("content-length", 0))
-        with open(archive, "wb") as f, tqdm(total=total, unit="B", unit_scale=True) as pbar:
-            for chunk in r.iter_content(chunk_size=1 << 20):
-                f.write(chunk)
-                pbar.update(len(chunk))
+    total = _expected_size(url)
+    print(f"target size: {total / 1e6:.1f} MB")
+
+    for attempt in range(MAX_RETRIES):
+        have = archive.stat().st_size if archive.exists() else 0
+        if total and have >= total:
+            print(f"[done] already have {have / 1e6:.1f} MB")
+            return archive
+
+        headers = {"Range": f"bytes={have}-", "User-Agent": "loopback-rec/0.1"}
+        try:
+            with requests.get(url, stream=True, timeout=60, headers=headers) as r:
+                if r.status_code == 416:  # range not satisfiable → file complete
+                    return archive
+                r.raise_for_status()
+                mode = "ab" if have else "wb"
+                with open(archive, mode) as f, tqdm(
+                    total=total, initial=have, unit="B", unit_scale=True,
+                    desc=f"attempt {attempt+1}/{MAX_RETRIES}",
+                ) as pbar:
+                    for chunk in r.iter_content(chunk_size=1 << 16):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        pbar.update(len(chunk))
+            break  # success
+        except (requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            wait = min(2 ** attempt, 60)
+            print(f"\n[retry] {type(e).__name__}: {e}. Sleeping {wait}s...")
+            time.sleep(wait)
+    else:
+        raise RuntimeError(f"download failed after {MAX_RETRIES} attempts")
+
     return archive
 
 
@@ -67,15 +101,18 @@ def process(tsv: Path, out_dir: Path = PROCESSED_DIR) -> None:
             has_header=False,
             new_columns=list(TSV_SCHEMA.keys()),
             schema_overrides=TSV_SCHEMA,
+            quote_char=None,
             ignore_errors=True,
         )
         .drop_nulls(["user_id", "track_name", "artist_name", "timestamp"])
         .with_columns(
-            pl.col("timestamp").str.to_datetime(strict=False).alias("ts"),
+            pl.col("timestamp")
+            .str.to_datetime(format="%Y-%m-%dT%H:%M:%SZ", time_zone="UTC", strict=False)
+            .alias("ts"),
             pl.concat_str(["artist_name", "track_name"], separator=" — ").alias("track_key"),
         )
         .drop_nulls("ts")
-        .collect(streaming=True)
+        .collect(engine="streaming")
     )
 
     user_ids = df["user_id"].unique().sort()
@@ -109,6 +146,15 @@ def process(tsv: Path, out_dir: Path = PROCESSED_DIR) -> None:
         }
     )
     vocab.write_parquet(out_dir / "vocab.parquet")
+
+    # Track labels for the demo: (track_idx, "Artist — Track", artist_name)
+    labels_df = pl.DataFrame(
+        {
+            "track_idx": list(range(len(track_map))),
+            "label": list(track_map.keys()),
+        }
+    ).sort("track_idx")
+    labels_df.write_parquet(out_dir / "track_labels.parquet")
 
     print(f"users={len(user_map):,} tracks={len(track_map):,} artists={len(artist_map):,}")
     print(f"train={train.height:,} val={val.height:,} test={test.height:,}")

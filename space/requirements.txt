@@ -1,0 +1,7 @@
+torch
+faiss-cpu
+gradio
+polars
+huggingface_hub
+numpy
+pyarrow

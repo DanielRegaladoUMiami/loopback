@@ -36,6 +36,26 @@ uv run python -m loopback.eval            # recall@10, recall@50
 
 Temporal split: oldest 80% train, next 10% val, last 10% test.
 
+After processing: **992 users · 1.5M unique tracks · 174K artists · 19.1M interactions** (15.3M train / 1.9M val / 1.9M test).
+
+## Results
+
+3 epochs, batch 4096, embed dim 128, in-batch negatives, AdamW lr=1e-3, Apple M-series MPS, ~9 min/epoch.
+
+| Metric | Value | Random baseline |
+|---|---|---|
+| Recall@10  | **0.0708** | 6.7e-6 |
+| Recall@50  | **0.2172** | 3.3e-5 |
+| Recall@100 | **0.3140** | 6.7e-5 |
+
+Evaluated on 847 test users with seen-track filtering against the full 1.5M-track catalog.
+
+## Math: why InfoNCE with in-batch negatives works
+
+Given a batch of `B` (user, positive-track) pairs, we compute the `B × B` similarity matrix `S` where `S[i,j] = u_i · t_j`. The diagonal is the positive pair, off-diagonal entries are treated as negatives — every other track in the batch is an "implicit" negative for user `i`.
+
+The loss is symmetric cross-entropy on `S` (user→track) and `S.T` (track→user), exactly the CLIP objective. With a learnable temperature, the model learns how peaked the softmax should be. This avoids ever materializing the full 1.5M-track softmax denominator that would make naive maximum-likelihood training infeasible.
+
 ## License
 
 Apache 2.0
