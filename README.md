@@ -6,6 +6,8 @@ Two-tower neural recommender for music, built from scratch in PyTorch.
 
 An open-source implementation of the canonical **two-tower retrieval architecture** used in production at YouTube, Spotify, and other recommenders. Trained on the Last.fm 1K users dataset (19M listening events).
 
+> **Paper-style writeup:** [`docs/PAPER.md`](docs/PAPER.md) — abstract, method, math, results, limitations.
+
 The goal: a reference implementation that's *readable*, *reproducible*, and *honest about the math* — contrastive loss, in-batch negatives, sampled softmax, and FAISS retrieval explained from first principles.
 
 ## Architecture
